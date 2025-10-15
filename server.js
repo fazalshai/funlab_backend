@@ -1,85 +1,123 @@
-// server.js
+require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const { MongoClient, ObjectId } = require("mongodb");
+
 const app = express();
 const port = 5000;
 
+// Middleware
 app.use(cors());
 app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
 
-let users = {}; // ID -> { name, regNo }
-let fingerprintLogs = []; // Array of { id, name, regNo, date, time, direction }
-let borrowedItems = [];   // Array of { name, regNo, item, issuedDate }
+const client = new MongoClient(process.env.MONGO_URI);
+let db, logsCollection, namesCollection, itemsCollection;
 
-app.post("/save-user", (req, res) => {
-  const { id, name, regNo } = req.body;
-  if (!id || !name || !regNo) {
-    return res.status(400).json({ message: "Missing fields" });
+// === Connect to MongoDB ===
+async function connectDB() {
+  try {
+    await client.connect();
+    db = client.db("funlab"); // database name
+    logsCollection = db.collection("logs");
+    namesCollection = db.collection("names");
+    itemsCollection = db.collection("items");
+    console.log("✅ Connected to MongoDB");
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:", err);
   }
-  users[id] = { name, regNo };
-  return res.json({ message: "User saved", user: users[id] });
+}
+
+connectDB();
+
+// === Save new user ===
+app.post("/save-user", async (req, res) => {
+  const { id, name, regNo } = req.body;
+  if (!id || !name) return res.status(400).json({ message: "Missing ID or name" });
+
+  await namesCollection.updateOne(
+    { id },
+    { $set: { name, regNo } },
+    { upsert: true }
+  );
+
+  // Update previous unknown logs
+  await logsCollection.updateMany(
+    { id, name: "Unknown" },
+    { $set: { name, regNo: regNo || "-" } }
+  );
+
+  res.json({ message: "✅ User saved" });
 });
 
-app.get("/log.php", (req, res) => {
+// === Receive fingerprint log ===
+app.get("/log.php", async (req, res) => {
   const { id, date, time, dir } = req.query;
-  if (!id || !date || !time || !dir) {
-    return res.status(400).json({ message: "Missing log parameters" });
-  }
+  if (!id || !date || !time || !dir)
+    return res.status(400).json({ message: "Missing parameters" });
 
-  const user = users[id] || { name: "Unknown", regNo: "-" };
-  fingerprintLogs.push({
+  const user = await namesCollection.findOne({ id });
+
+  const entry = {
     id,
-    name: user.name,
-    regNo: user.regNo,
+    name: user?.name || "Unknown",
+    regNo: user?.regNo || "-",
     date,
     time,
-    direction: dir
-  });
+    direction: dir,
+  };
 
-  return res.status(200).json({ message: "Log received" });
+  await logsCollection.insertOne(entry);
+
+  res.json({ message: "Log saved", entry });
 });
 
-app.get("/users", (req, res) => {
-  return res.json(users);
+// === Get logs (optionally filtered by date) ===
+app.get("/logs", async (req, res) => {
+  const { date } = req.query;
+  const query = date ? { date } : {};
+  const logs = await logsCollection.find(query).toArray();
+  res.json(logs);
 });
 
-app.get("/logs", (req, res) => {
-  return res.json(fingerprintLogs);
-});
-
-app.post("/borrow-item", (req, res) => {
+// === Borrow item ===
+app.post("/borrow-item", async (req, res) => {
   const { name, regNo, item, issuedDate } = req.body;
-  if (!name || !regNo || !item || !issuedDate) {
+  if (!name || !regNo || !item || !issuedDate)
     return res.status(400).json({ message: "Missing fields" });
+
+  await itemsCollection.insertOne({ name, regNo, item, issuedDate });
+
+  res.json({ message: "Item added successfully" });
+});
+
+// === Get borrowed items ===
+app.get("/borrowed-items", async (req, res) => {
+  const items = await itemsCollection.find().toArray();
+  res.json(items);
+});
+
+// === Delete log ===
+app.delete("/logs/:id", async (req, res) => {
+  try {
+    await logsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+    res.json({ message: "Deleted" });
+  } catch {
+    res.status(500).json({ message: "Delete failed" });
   }
-  borrowedItems.push({ name, regNo, item, issuedDate });
-  return res.json({ message: "Item borrowed" });
 });
 
-app.get("/borrowed-items", (req, res) => {
-  return res.json(borrowedItems);
-});
-
-app.delete("/logs/:index", (req, res) => {
-  const i = parseInt(req.params.index);
-  if (i >= 0 && i < fingerprintLogs.length) {
-    fingerprintLogs.splice(i, 1);
-    return res.json({ message: "Deleted" });
+// === Delete item ===
+app.delete("/borrowed-items/:id", async (req, res) => {
+  try {
+    await itemsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+    res.json({ message: "Deleted" });
+  } catch {
+    res.status(500).json({ message: "Delete failed" });
   }
-  res.status(404).json({ message: "Not found" });
 });
 
-app.delete("/borrowed-items/:index", (req, res) => {
-  const i = parseInt(req.params.index);
-  if (i >= 0 && i < borrowedItems.length) {
-    borrowedItems.splice(i, 1);
-    return res.json({ message: "Deleted" });
-  }
-  res.status(404).json({ message: "Not found" });
-});
-
+// === Start server ===
 app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
+  console.log(`🚀 Server running at http://localhost:${port}`);
 });
