@@ -50,6 +50,16 @@ app.post("/save-user", async (req, res) => {
   res.json({ message: "✅ User saved" });
 });
 
+// === Get all users ===
+app.get("/users", async (req, res) => {
+  try {
+    const users = await namesCollection.find().toArray();
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching users" });
+  }
+});
+
 // === Receive fingerprint log ===
 app.get("/log.php", async (req, res) => {
   let { id, date, time, dir } = req.query;
