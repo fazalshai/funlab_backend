@@ -52,9 +52,16 @@ app.post("/save-user", async (req, res) => {
 
 // === Receive fingerprint log ===
 app.get("/log.php", async (req, res) => {
-  const { id, date, time, dir } = req.query;
-  if (!id || !date || !time || !dir)
-    return res.status(400).json({ message: "Missing parameters" });
+  let { id, date, time, dir } = req.query;
+
+  // Use server time if date/time missing (robustness for ESP32)
+  if (!date) {
+    const now = new Date();
+    date = now.toISOString().split('T')[0]; // YYYY-MM-DD
+  }
+
+  if (!id || !time || !dir)
+    return res.status(400).json({ message: "Missing parameters: id, time, or dir" });
 
   const user = await namesCollection.findOne({ id });
 
