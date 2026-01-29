@@ -127,4 +127,21 @@ app.delete("/borrowed-items/:id", async (req, res) => {
 // === Start server ===
 app.listen(port, () => {
   console.log(`🚀 Server running at http://localhost:${port}`);
+
+  // Schedule: Check every minute for "Last Minute of the Month"
+  setInterval(async () => {
+    const now = new Date();
+    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+
+    // Check if it's the last day of the month, 23:59
+    if (now.getDate() === lastDay && now.getHours() === 23 && now.getMinutes() === 59) {
+      console.log("🧹 Performing monthly log cleanup...");
+      try {
+        await logsCollection.deleteMany({});
+        console.log("✅ All logs deleted for the new month.");
+      } catch (err) {
+        console.error("❌ Cleanup failed:", err);
+      }
+    }
+  }, 60000); // Run every 60 seconds
 });
