@@ -159,6 +159,28 @@ app.delete("/borrowed-items/:id", async (req, res) => {
   }
 });
 
+// ─── Manual cleanup: delete all logs before current month (IST) ─────────────
+app.delete("/admin/cleanup-old-logs", async (req, res) => {
+  try {
+    const { istObj } = getISTDateTime();
+    const year  = istObj.getUTCFullYear();
+    const month = String(istObj.getUTCMonth() + 1).padStart(2, "0");
+    const currentPrefix = `${year}-${month}`; // e.g. "2026-03"
+
+    // Delete every log whose date is lexicographically less than current month prefix
+    // Dates are stored as "YYYY-MM-DD" so string comparison works perfectly
+    const result = await logsCollection.deleteMany({
+      date: { $lt: currentPrefix },
+    });
+
+    console.log(`🧹 Manual cleanup: deleted ${result.deletedCount} old logs (before ${currentPrefix})`);
+    res.json({ message: `✅ Deleted ${result.deletedCount} logs older than ${currentPrefix}` });
+  } catch (err) {
+    console.error("Cleanup error:", err);
+    res.status(500).json({ message: "Cleanup failed" });
+  }
+});
+
 // ─── Remote Unlock ───────────────────────────────────────────────────────────
 let unlockRequestActive    = false;
 let unlockRequestTimestamp = 0;
