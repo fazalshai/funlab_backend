@@ -117,9 +117,22 @@ app.get("/log.php", async (req, res) => {
 });
 
 // ─── Get logs (optionally filtered by date) ──────────────────────────────────
+// Logs were historically stored WITHOUT leading zeros (e.g. "2026-3-18").
+// After the IST fix, new logs use padded format ("2026-03-18").
+// We query BOTH variants so nothing is missed.
+function dateVariants(dateStr) {
+  // dateStr comes from frontend as YYYY-MM-DD (padded)
+  const parts = dateStr.split("-");
+  if (parts.length !== 3) return [dateStr];
+  const [y, m, d] = parts;
+  const padded   = `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
+  const unpadded = `${parseInt(y)}-${parseInt(m)}-${parseInt(d)}`;
+  return padded === unpadded ? [padded] : [padded, unpadded];
+}
+
 app.get("/logs", async (req, res) => {
   const { date } = req.query;
-  const query = date ? { date } : {};
+  const query = date ? { date: { $in: dateVariants(date) } } : {};
   const logs = await logsCollection.find(query).sort({ _id: -1 }).toArray();
   res.json(logs);
 });
@@ -160,21 +173,43 @@ app.delete("/borrowed-items/:id", async (req, res) => {
 });
 
 // ─── Manual cleanup: delete all logs before current month (IST) ─────────────
+// Uses regex on year-month prefix to match BOTH padded and unpadded date formats.
 app.delete("/admin/cleanup-old-logs", async (req, res) => {
   try {
     const { istObj } = getISTDateTime();
     const year  = istObj.getUTCFullYear();
-    const month = String(istObj.getUTCMonth() + 1).padStart(2, "0");
-    const currentPrefix = `${year}-${month}`; // e.g. "2026-03"
+    const month = istObj.getUTCMonth() + 1; // 1-12, no padding
 
-    // Delete every log whose date is lexicographically less than current month prefix
-    // Dates are stored as "YYYY-MM-DD" so string comparison works perfectly
-    const result = await logsCollection.deleteMany({
-      date: { $lt: currentPrefix },
-    });
+    // Build list of all year-month prefixes OLDER than current month
+    // and delete any log whose date starts with one of those prefixes.
+    // This handles both "2026-3-" and "2026-03-" formats.
+    const deletePromises = [];
 
-    console.log(`🧹 Manual cleanup: deleted ${result.deletedCount} old logs (before ${currentPrefix})`);
-    res.json({ message: `✅ Deleted ${result.deletedCount} logs older than ${currentPrefix}` });
+    // Delete all logs from previous years entirely
+    for (let y = 2025; y < year; y++) {
+      deletePromises.push(
+        logsCollection.deleteMany({ date: { $regex: `^${y}-` } })
+      );
+    }
+    // Delete logs from current year but previous months
+    for (let m = 1; m < month; m++) {
+      const padded   = String(m).padStart(2, "0");
+      const unpadded = String(m);
+      deletePromises.push(
+        logsCollection.deleteMany({
+          $or: [
+            { date: { $regex: `^${year}-${padded}-` } },
+            { date: { $regex: `^${year}-${unpadded}-` } },
+          ]
+        })
+      );
+    }
+
+    const results = await Promise.all(deletePromises);
+    const total   = results.reduce((sum, r) => sum + r.deletedCount, 0);
+
+    console.log(`🧹 Manual cleanup: deleted ${total} old logs`);
+    res.json({ message: `✅ Deleted ${total} old logs (before ${year}-${month})` });
   } catch (err) {
     console.error("Cleanup error:", err);
     res.status(500).json({ message: "Cleanup failed" });
