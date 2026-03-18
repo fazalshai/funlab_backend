@@ -7,18 +7,44 @@ const { MongoClient, ObjectId } = require("mongodb");
 const app = express();
 const port = 5000;
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json());
 
 const client = new MongoClient(process.env.MONGO_URI);
 let db, logsCollection, namesCollection, itemsCollection;
 
-// === Connect to MongoDB ===
+// ─── IST Helper (UTC+5:30) ──────────────────────────────────────────────────
+function getISTDateTime() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+
+  const year  = ist.getUTCFullYear();
+  const month = String(ist.getUTCMonth() + 1).padStart(2, "0");
+  const day   = String(ist.getUTCDate()).padStart(2, "0");
+  const hours = String(ist.getUTCHours()).padStart(2, "0");
+  const mins  = String(ist.getUTCMinutes()).padStart(2, "0");
+  const secs  = String(ist.getUTCSeconds()).padStart(2, "0");
+
+  return {
+    date: `${year}-${month}-${day}`,        // YYYY-MM-DD  (always IST)
+    time: `${hours}:${mins}:${secs}`,       // HH:MM:SS    (always IST, leading zeros)
+    istObj: ist,
+  };
+}
+
+// Normalize time string to HH:MM:SS (add leading zeros if ESP32 skips them)
+function normalizeTime(t) {
+  if (!t) return null;
+  const parts = t.split(":").map((p) => p.padStart(2, "0"));
+  while (parts.length < 3) parts.push("00");
+  return parts.join(":");
+}
+
+// ─── Connect to MongoDB ──────────────────────────────────────────────────────
 async function connectDB() {
   try {
     await client.connect();
-    db = client.db("funlab"); // database name
+    db = client.db("funlab");
     logsCollection = db.collection("logs");
     namesCollection = db.collection("names");
     itemsCollection = db.collection("items");
@@ -27,10 +53,9 @@ async function connectDB() {
     console.error("❌ MongoDB connection failed:", err);
   }
 }
-
 connectDB();
 
-// === Save new user ===
+// ─── Save / update user ──────────────────────────────────────────────────────
 app.post("/save-user", async (req, res) => {
   const { id, name, regNo } = req.body;
   if (!id || !name) return res.status(400).json({ message: "Missing ID or name" });
@@ -40,17 +65,14 @@ app.post("/save-user", async (req, res) => {
     { $set: { name, regNo } },
     { upsert: true }
   );
-
-  // Update previous unknown logs
   await logsCollection.updateMany(
     { id, name: "Unknown" },
     { $set: { name, regNo: regNo || "-" } }
   );
-
   res.json({ message: "✅ User saved" });
 });
 
-// === Get all users ===
+// ─── Get all users ───────────────────────────────────────────────────────────
 app.get("/users", async (req, res) => {
   try {
     const users = await namesCollection.find().toArray();
@@ -60,61 +82,64 @@ app.get("/users", async (req, res) => {
   }
 });
 
-// === Receive fingerprint log ===
+// ─── Receive fingerprint log ─────────────────────────────────────────────────
+// IMPORTANT: We ALWAYS use the server's IST date so that entries logged at e.g.
+// 8:30 IST (which is the previous UTC day) are stored correctly under today's
+// IST date. The ESP32's `date` param is intentionally ignored.
 app.get("/log.php", async (req, res) => {
-  let { id, date, time, dir } = req.query;
+  const { id, time: rawTime, dir } = req.query;
 
-  // Use server time if date/time missing (robustness for ESP32)
-  if (!date) {
-    const now = new Date();
-    date = now.toISOString().split('T')[0]; // YYYY-MM-DD
-  }
+  if (!id || !dir)
+    return res.status(400).json({ message: "Missing parameters: id or dir" });
 
-  if (!id || !time || !dir)
-    return res.status(400).json({ message: "Missing parameters: id, time, or dir" });
+  const ist = getISTDateTime();
+
+  // Always use server IST date (ESP32 sends UTC date which is wrong for IST)
+  const date = ist.date;
+
+  // Use ESP32 time if provided (ESP32 is assumed to run IST NTP), else use server IST time
+  // Either way normalise to HH:MM:SS with leading zeros
+  const time = normalizeTime(rawTime) || ist.time;
 
   const user = await namesCollection.findOne({ id });
 
   const entry = {
     id,
-    name: user?.name || "Unknown",
-    regNo: user?.regNo || "-",
+    name:      user?.name  || "Unknown",
+    regNo:     user?.regNo || "-",
     date,
     time,
     direction: dir,
   };
 
   await logsCollection.insertOne(entry);
-
   res.json({ message: "Log saved", entry });
 });
 
-// === Get logs (optionally filtered by date) ===
+// ─── Get logs (optionally filtered by date) ──────────────────────────────────
 app.get("/logs", async (req, res) => {
   const { date } = req.query;
   const query = date ? { date } : {};
-  const logs = await logsCollection.find(query).toArray();
+  const logs = await logsCollection.find(query).sort({ _id: -1 }).toArray();
   res.json(logs);
 });
 
-// === Borrow item ===
+// ─── Borrow item ─────────────────────────────────────────────────────────────
 app.post("/borrow-item", async (req, res) => {
   const { name, regNo, item, issuedDate } = req.body;
   if (!name || !regNo || !item || !issuedDate)
     return res.status(400).json({ message: "Missing fields" });
-
   await itemsCollection.insertOne({ name, regNo, item, issuedDate });
-
   res.json({ message: "Item added successfully" });
 });
 
-// === Get borrowed items ===
+// ─── Get borrowed items ──────────────────────────────────────────────────────
 app.get("/borrowed-items", async (req, res) => {
   const items = await itemsCollection.find().toArray();
   res.json(items);
 });
 
-// === Delete log ===
+// ─── Delete log ──────────────────────────────────────────────────────────────
 app.delete("/logs/:id", async (req, res) => {
   try {
     await logsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
@@ -124,7 +149,7 @@ app.delete("/logs/:id", async (req, res) => {
   }
 });
 
-// === Delete item ===
+// ─── Delete borrowed item ────────────────────────────────────────────────────
 app.delete("/borrowed-items/:id", async (req, res) => {
   try {
     await itemsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
@@ -134,24 +159,58 @@ app.delete("/borrowed-items/:id", async (req, res) => {
   }
 });
 
-// === Start server ===
+// ─── Remote Unlock ───────────────────────────────────────────────────────────
+let unlockRequestActive    = false;
+let unlockRequestTimestamp = 0;
+const UNLOCK_TIMEOUT_MS    = 30000;
+
+app.post("/admin/unlock", (req, res) => {
+  unlockRequestActive    = true;
+  unlockRequestTimestamp = Date.now();
+  console.log("Remote unlock requested by Admin.");
+  res.json({ success: true, message: "Unlock command sent. Waiting for door to poll..." });
+});
+
+app.get("/check-unlock", (req, res) => {
+  if (unlockRequestActive && Date.now() - unlockRequestTimestamp < UNLOCK_TIMEOUT_MS) {
+    unlockRequestActive = false;
+    console.log("Door polled: Unlock command delivered.");
+    res.json({ unlock: true });
+  } else {
+    res.json({ unlock: false });
+  }
+});
+
+// ─── Start server & monthly cleanup ─────────────────────────────────────────
 app.listen(port, () => {
   console.log(`🚀 Server running at http://localhost:${port}`);
 
-  // Schedule: Check every minute for "Last Minute of the Month"
+  // Every minute, check if it's midnight on the 1st of the month (IST).
+  // If so, delete all logs from the PREVIOUS month only.
   setInterval(async () => {
-    const now = new Date();
-    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const { istObj } = getISTDateTime();
 
-    // Check if it's the last day of the month, 23:59
-    if (now.getDate() === lastDay && now.getHours() === 23 && now.getMinutes() === 59) {
-      console.log("🧹 Performing monthly log cleanup...");
+    if (
+      istObj.getUTCDate()    === 1  &&
+      istObj.getUTCHours()   === 0  &&
+      istObj.getUTCMinutes() === 0
+    ) {
+      // Build "YYYY-MM" prefix for previous month
+      const prevYear  = istObj.getUTCMonth() === 0
+        ? istObj.getUTCFullYear() - 1
+        : istObj.getUTCFullYear();
+      const prevMonth = istObj.getUTCMonth() === 0 ? 12 : istObj.getUTCMonth();
+      const prefix    = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
+
+      console.log(`🧹 Monthly cleanup: removing logs for ${prefix}...`);
       try {
-        await logsCollection.deleteMany({});
-        console.log("✅ All logs deleted for the new month.");
+        const result = await logsCollection.deleteMany({
+          date: { $regex: `^${prefix}` },
+        });
+        console.log(`✅ Deleted ${result.deletedCount} logs from ${prefix}`);
       } catch (err) {
         console.error("❌ Cleanup failed:", err);
       }
     }
-  }, 60000); // Run every 60 seconds
+  }, 60000);
 });
