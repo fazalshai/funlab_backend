@@ -238,6 +238,32 @@ app.get("/check-unlock", (req, res) => {
   }
 });
 
+// ─── Remote Fingerprint Delete ───────────────────────────────────────────────
+// Admin posts { fingerprintId: 7 }  →  stored here
+// ESP32 polls GET /delete.php        →  gets "7" once, then "NONE"
+let pendingDeleteID = null;
+
+app.post("/admin/delete-fingerprint", (req, res) => {
+  const { fingerprintId } = req.body;
+  if (!fingerprintId || isNaN(Number(fingerprintId))) {
+    return res.status(400).json({ message: "Invalid fingerprintId" });
+  }
+  pendingDeleteID = String(fingerprintId);
+  console.log(`Delete fingerprint queued: ID ${pendingDeleteID}`);
+  res.json({ success: true, message: `Delete queued for fingerprint ID ${pendingDeleteID}` });
+});
+
+app.get("/delete.php", (req, res) => {
+  if (pendingDeleteID) {
+    const id = pendingDeleteID;
+    pendingDeleteID = null; // clear after delivering so ESP only acts once
+    console.log(`ESP32 polled delete: delivering ID ${id}`);
+    res.send(id);
+  } else {
+    res.send("NONE");
+  }
+});
+
 // ─── Start server & monthly cleanup ─────────────────────────────────────────
 app.listen(port, () => {
   console.log(`🚀 Server running at http://localhost:${port}`);
